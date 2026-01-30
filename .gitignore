@@ -1,0 +1,21 @@
+# Secrets
+config/secrets.yaml
+*.secret
+*.key
+
+# Logs
+*.log
+logs/
+
+# Cache
+__pycache__/
+*.pyc
+
+# Backups
+backups/
+
+# OS
+.DS_Store
+
+# Temp
+*.tmp

@@ -1,0 +1,194 @@
+# Animara Configuration
+# Version: 4.0
+
+# ═══════════════════════════════════════════════════════════════
+# SYSTEM
+# ═══════════════════════════════════════════════════════════════
+
+system:
+  version: "4.0"
+  workspace: "~/animara/workspace"
+  logs: "~/animara/logs"
+  timezone: "Asia/Makassar"
+
+# ═══════════════════════════════════════════════════════════════
+# LLM
+# ═══════════════════════════════════════════════════════════════
+
+llm:
+  # Local model (primary)
+  local:
+    api: "http://127.0.0.1:8010"
+    model: "qwen3"
+    max_tokens: 1500
+    temperature: 0.7
+  
+  # God Mode (for complex tasks)
+  godmode:
+    enabled: true
+    provider: "anthropic"  # anthropic | openai
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 32000
+    # API key in secrets.yaml
+
+# ═══════════════════════════════════════════════════════════════
+# MEMORY
+# ═══════════════════════════════════════════════════════════════
+
+memory:
+  # Milvus
+  milvus:
+    uri: "http://localhost:19530"
+    collections:
+      - conversations
+      - memories
+      - persons
+      - events
+      - projects
+      - conversation_summaries
+  
+  # Embeddings
+  embedding:
+    model: "~/models/embeddings/bge-m3"
+    dimension: 1024
+  
+  # Reranker
+  reranker:
+    model: "~/models/rerankers/bge-reranker-v2-m3"
+  
+  # Session
+  session:
+    max_messages: 20
+    timeout_minutes: 60
+    flush_threshold: 28000  # tokens
+    context_limit: 32000
+
+# ═══════════════════════════════════════════════════════════════
+# TOOLS
+# ═══════════════════════════════════════════════════════════════
+
+tools:
+  # Core tools (always available)
+  core:
+    - exec
+    - read
+    - write
+    - edit
+    - memory_search
+    - memory_save
+  
+  # Skills
+  skills:
+    builtin:
+      - web_search
+      - browser
+      - yougile
+      - camera
+      - speak
+      - listen
+    user: []
+    managed: []
+  
+  # Security
+  security:
+    denied_commands:
+      - "rm -rf /"
+      - "rm -rf ~"
+      - "sudo rm -rf"
+      - "dd if="
+      - "mkfs"
+      - "> /dev/sd"
+    elevated_commands:
+      - "sudo *"
+      - "docker rm *"
+      - "docker stop *"
+      - "systemctl *"
+      - "pip uninstall *"
+    allowed_write_paths:
+      - "~/animara/"
+      - "/tmp/"
+
+# ═══════════════════════════════════════════════════════════════
+# CHANNELS
+# ═══════════════════════════════════════════════════════════════
+
+channels:
+  telegram:
+    enabled: true
+    # Token in secrets.yaml
+    owner_id: 237895794
+  
+  voice:
+    enabled: true
+    asr:
+      provider: "riva"
+      container: "riva-speech"
+      port: 50051
+    tts:
+      provider: "piper"
+      port: 10200
+      voice: "ru_RU-ruslan-medium"
+  
+  webui:
+    enabled: true
+    port: 8080
+
+# ═══════════════════════════════════════════════════════════════
+# HEARTBEAT
+# ═══════════════════════════════════════════════════════════════
+
+heartbeat:
+  enabled: true
+  interval_minutes: 30
+  
+  checks:
+    critical:
+      - docker_health
+      - ssd_mounted
+      - llm_api
+      - milvus_api
+    warning:
+      - disk_space
+      - gpu_memory
+  
+  alerts:
+    telegram: true
+    log: true
+  
+  cron:
+    morning_briefing: "0 9 * * *"
+    evening_report: "0 21 * * *"
+    maintenance: "0 3 * * *"
+
+# ═══════════════════════════════════════════════════════════════
+# USERS
+# ═══════════════════════════════════════════════════════════════
+
+users:
+  owner: "owner_sergey"
+  
+  roles:
+    owner:
+      tools: ["*"]
+      sandbox: "off"
+    admin:
+      tools: ["*"]
+      sandbox: "workspace"
+      deny: ["sudo"]
+    friend:
+      tools: ["memory_search", "web_search", "speak"]
+      sandbox: "readonly"
+    guest:
+      tools: ["web_search"]
+      sandbox: "none"
+
+# ═══════════════════════════════════════════════════════════════
+# VISION (Future)
+# ═══════════════════════════════════════════════════════════════
+
+vision:
+  enabled: false  # TODO: fix DeepStream visualization
+  camera: "/dev/video0"
+  face_recognition:
+    model: "insightface"
+    threshold: 0.70

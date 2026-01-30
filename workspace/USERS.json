@@ -1,0 +1,18 @@
+{
+  "237895794": {
+    "person_id": "owner_sergey",
+    "name": "Сергей",
+    "role": "owner",
+    "level": 2,
+    "registered_at": "2026-01-27",
+    "last_seen": "2026-01-31"
+  },
+  "395638218": {
+    "person_id": "friend_ульяна",
+    "name": "Ульяна",
+    "role": "friend",
+    "level": 1,
+    "registered_at": "2026-01-30",
+    "last_seen": "2026-01-30"
+  }
+}
