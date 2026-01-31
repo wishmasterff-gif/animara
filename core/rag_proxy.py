@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
 """
-🚀 ANIMARA RAG PROXY v10.1 — WITH TOOLS + THINKING MODE
+🚀 ANIMARA RAG PROXY v10.4 — GOD MODE через OAuth (ChatGPT Plus/Pro подписка)
 
-Новое в v10.1:
-1. ✅ yougile_create — создание задач (НЕ галлюцинирует!)
-2. ✅ THINKING MODE — автоматически для сложных задач
-3. ✅ Честный промпт — "если не можешь — скажи честно"
-4. ✅ Всё из v10: tools, ReAct, workspace, hybrid search
+Новое в v10.4:
+1. ✅ GOD MODE через OAuth (НЕ платный API!)
+   - Использует ~/.codex/auth.json от OpenAI Codex CLI
+   - ChatGPT Plus ($20/мес) или Pro ($200/мес) подписка
+   - Модели: gpt-4o, o4-mini, gpt-5.2-codex (когда доступны)
+   - Контекст: 128K-400K токенов
+   
+2. ✅ Команды:
+   - "Активируй режим бога" / "/god" → включить
+   - "Отключи режим бога" / "/local" → выключить
+   
+3. ✅ Автообновление токенов через refresh_token
+
+4. ✅ Всё из v10.1: tools, ReAct, workspace, hybrid search, thinking mode
+
+НАСТРОЙКА:
+1. На машине с браузером: npm install -g @openai/codex && codex login
+2. Скопировать ~/.codex/auth.json на Jetson Thor
+3. Готово! Токены автообновляются
 """
 
 import os
@@ -28,6 +42,8 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from sentence_transformers import SentenceTransformer
 from pymilvus import MilvusClient
 from rank_bm25 import BM25Okapi
+# God Mode via Codex CLI
+from animara_godmode_patch import check_godmode_command, call_chatgpt_codex, GODMODE_CONFIG
 
 # Добавляем путь к skills
 sys.path.insert(0, os.path.expanduser("~/animara"))
@@ -37,29 +53,63 @@ sys.path.insert(0, os.path.expanduser("~/animara"))
 # ═══════════════════════════════════════════════════════════════
 
 CONFIG = {
+    "version": "10.4",
+    
+    # Local LLM (Qwen3)
     "llm_api": "http://127.0.0.1:8010",
+    "llm_model": "qwen3",
+    "llm_max_tokens": 2000,
+    "llm_context": 32768,  # 32K для Qwen3
+    
+    # Milvus
     "milvus_uri": "http://localhost:19530",
+    
+    # Embedding
     "embedding_model": "/home/agx-thor/models/embeddings/bge-m3",
+    
+    # Paths
     "workspace_path": "/home/agx-thor/animara/workspace",
     "skills_path": "/home/agx-thor/animara/skills",
+    
+    # Users
     "default_person_id": "owner_sergey",
+    "owner_person_id": "owner_sergey",
+    
+    # Cache
     "profile_cache_ttl": 300,
+    
+    # Session
     "session_max_messages": 20,
     "session_timeout": 1800,
+    
     # Hybrid Search
     "vector_weight": 0.7,
     "bm25_weight": 0.3,
     "search_top_k": 5,
+    
     # Memory Flush
     "context_limit": 32000,
     "flush_threshold": 28000,
     "reserve_tokens": 4000,
+    
     # Session Pruning
     "prune_after_messages": 3,
     "prune_tool_max_chars": 200,
+    
     # Tools
     "max_tool_iterations": 5,
     "tool_timeout": 30,
+    
+    # ═══════════════════════════════════════════════════════════════
+    # GOD MODE — OAuth через ChatGPT Plus/Pro подписку
+    # ═══════════════════════════════════════════════════════════════
+    "godmode_auth_file": os.path.expanduser("~/.codex/auth.json"),
+    "godmode_model": "gpt-4o",  # Основная модель (128K контекст)
+    "godmode_model_reasoning": "o4-mini",  # Для сложных задач (если доступна)
+    "godmode_max_tokens": 16384,  # Лимит на ответ
+    "godmode_context": 128000,  # 128K контекст для gpt-4o
+    "godmode_api_url": "https://api.openai.com/v1/chat/completions",
+    "godmode_auth_url": "https://auth.openai.com/oauth/token",
 }
 
 embedder = None
@@ -67,6 +117,354 @@ milvus = None
 bm25_index = None
 bm25_docs = []
 bm25_ids = []
+
+# ═══════════════════════════════════════════════════════════════
+# OAUTH PROVIDER — ChatGPT через Codex CLI
+# ═══════════════════════════════════════════════════════════════
+
+class ChatGPTAuthProvider:
+    """
+    Провайдер OAuth токенов для ChatGPT Plus/Pro.
+    Использует токены от OpenAI Codex CLI.
+    
+    Установка:
+        npm install -g @openai/codex
+        codex login
+        scp ~/.codex/auth.json agx-thor@192.168.1.12:~/.codex/
+    """
+    
+    def __init__(self, auth_file: str = None):
+        self.auth_file = Path(auth_file or CONFIG["godmode_auth_file"])
+        self._tokens = None
+        self._load_time = 0
+    
+    def is_configured(self) -> bool:
+        """Проверяет настроен ли OAuth"""
+        return self.auth_file.exists()
+    
+    def _load_tokens(self) -> Optional[dict]:
+        """Загружает токены из файла (поддержка формата Codex CLI)"""
+        if not self.auth_file.exists():
+            return None
+        
+        try:
+            with open(self.auth_file, 'r') as f:
+                data = json.load(f)
+            
+            # Codex CLI сохраняет токены в data["tokens"]
+            if "tokens" in data:
+                tokens = data["tokens"]
+            else:
+                tokens = data
+            
+            # Если нет expires_at, ставим +1 час от сейчас
+            if "expires_at" not in tokens and "access_token" in tokens:
+                tokens["expires_at"] = int(time.time()) + 3600
+            
+            self._tokens = tokens
+            self._load_time = time.time()
+            return tokens
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки OAuth токенов: {e}")
+            return None
+    
+    def _save_tokens(self, tokens: dict):
+        """Сохраняет обновлённые токены"""
+        try:
+            self.auth_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.auth_file, 'w') as f:
+                json.dump(tokens, f, indent=2)
+            self._tokens = tokens
+            print(f"✅ OAuth токены обновлены: {self.auth_file}")
+        except Exception as e:
+            print(f"⚠️ Ошибка сохранения токенов: {e}")
+    
+    async def _refresh_token(self) -> bool:
+        """Обновляет access_token через refresh_token"""
+        if not self._tokens or "refresh_token" not in self._tokens:
+            return False
+        
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    CONFIG["godmode_auth_url"],
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": self._tokens["refresh_token"],
+                        "client_id": "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh",  # Codex client_id
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                
+                if response.status_code == 200:
+                    new_tokens = response.json()
+                    # Сохраняем новые токены
+                    self._tokens["access_token"] = new_tokens.get("access_token", self._tokens["access_token"])
+                    if "refresh_token" in new_tokens:
+                        self._tokens["refresh_token"] = new_tokens["refresh_token"]
+                    self._tokens["expires_at"] = int(time.time()) + new_tokens.get("expires_in", 3600)
+                    self._save_tokens(self._tokens)
+                    print("✅ OAuth токен обновлён")
+                    return True
+                else:
+                    print(f"⚠️ Ошибка обновления токена: {response.status_code}")
+                    return False
+        except Exception as e:
+            print(f"⚠️ Ошибка refresh: {e}")
+            return False
+    
+    async def get_access_token(self) -> Optional[str]:
+        """Получает действующий access_token"""
+        # Загружаем токены если нужно
+        if not self._tokens or (time.time() - self._load_time > 60):
+            self._load_tokens()
+        
+        if not self._tokens:
+            return None
+        
+        # Проверяем срок действия (обновляем за 5 минут до истечения)
+        expires_at = self._tokens.get("expires_at", 0)
+        if expires_at - time.time() < 300:
+            print("🔄 Обновляем OAuth токен...")
+            await self._refresh_token()
+        
+        return self._tokens.get("access_token")
+    
+    def get_status(self) -> dict:
+        """Статус OAuth авторизации"""
+        if not self._load_tokens():
+            return {
+                "configured": False,
+                "error": f"Файл {self.auth_file} не найден. Выполни: codex login"
+            }
+        
+        expires_at = self._tokens.get("expires_at", 0)
+        expires_in = int(expires_at - time.time())
+        
+        return {
+            "configured": True,
+            "expires_in_seconds": max(0, expires_in),
+            "expires_in_human": f"{expires_in // 60} мин" if expires_in > 0 else "Истёк",
+            "has_refresh_token": "refresh_token" in self._tokens
+        }
+
+# Глобальный провайдер OAuth
+oauth_provider = None
+
+# ═══════════════════════════════════════════════════════════════
+# GOD MODE SYSTEM — вызов ChatGPT через OAuth
+# ═══════════════════════════════════════════════════════════════
+
+def check_godmode_command(text: str) -> Optional[str]:
+    """
+    Проверяет является ли сообщение командой God Mode.
+    Returns: "activate", "deactivate", или None
+    """
+    text_lower = text.lower().strip()
+    
+    # Команды активации
+    activate_patterns = [
+        r"^активируй режим бога$",
+        r"^режим бога$",
+        r"^включи режим бога$",
+        r"^/god$",
+        r"^/godmode$",
+        r"^godmode$",
+        r"^god mode$",
+        r"^god$",
+    ]
+    
+    # Команды деактивации
+    deactivate_patterns = [
+        r"^отключи режим бога$",
+        r"^выключи режим бога$",
+        r"^локальный режим$",
+        r"^/local$",
+        r"^local$",
+        r"^выход$",
+        r"^выйди из режима бога$",
+    ]
+    
+    for pattern in activate_patterns:
+        if re.match(pattern, text_lower):
+            return "activate"
+    
+    for pattern in deactivate_patterns:
+        if re.match(pattern, text_lower):
+            return "deactivate"
+    
+    return None
+
+async def _old_call_chatgpt_oauth_DISABLED(messages: List[dict], system_prompt: str = "") -> dict:
+    """
+    Вызывает ChatGPT через OAuth (подписка Plus/Pro).
+    
+    Преимущества:
+    - Бесплатно в рамках подписки ($20-200/мес)
+    - 128K контекст (gpt-4o)
+    - Автообновление токенов
+    """
+    global oauth_provider
+    
+    # Получаем access_token
+    access_token = await oauth_provider.get_access_token()
+    
+    if not access_token:
+        return {
+            "choices": [{
+                "message": {
+                    "content": """❌ **God Mode недоступен: OAuth не настроен**
+
+**Как настроить:**
+1. На компьютере с браузером:
+   ```
+   npm install -g @openai/codex
+   codex login
+   ```
+2. Залогиниться в ChatGPT через браузер
+3. Скопировать токены на Jetson Thor:
+   ```
+   scp ~/.codex/auth.json agx-thor@192.168.1.12:~/.codex/
+   ```
+4. Готово! Токены автообновляются.
+
+**Требуется:** ChatGPT Plus ($20/мес) или Pro ($200/мес)"""
+                }
+            }]
+        }
+    
+    # Формируем messages для OpenAI
+    openai_messages = []
+    
+    # System prompt
+    if system_prompt:
+        openai_messages.append({"role": "system", "content": system_prompt})
+    else:
+        openai_messages.append({
+            "role": "system", 
+            "content": """Ты — Animara, мощный AI-ассистент в режиме бога (God Mode).
+Отвечай на русском языке.
+У тебя огромный контекст (128K токенов) — используй его для глубокого анализа.
+Ты можешь решать сложные задачи, писать код, анализировать и рассуждать.
+Если нужно думать пошагово — думай пошагово."""
+        })
+    
+    # User/Assistant messages
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        
+        if role == "system":
+            continue
+        elif role in ["user", "assistant"]:
+            openai_messages.append({"role": role, "content": content})
+    
+    # Если нет сообщений, добавляем дефолтное
+    if len(openai_messages) <= 1:
+        openai_messages.append({"role": "user", "content": "Привет"})
+    
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                CONFIG["godmode_api_url"],
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {access_token}"
+                },
+                json={
+                    "model": CONFIG["godmode_model"],
+                    "messages": openai_messages,
+                    "max_tokens": CONFIG["godmode_max_tokens"],
+                    "temperature": 0.7,
+                }
+            )
+            
+            if response.status_code == 401:
+                # Токен истёк — пробуем обновить
+                print("🔄 Токен истёк, обновляем...")
+                await oauth_provider._refresh_token()
+                new_token = await oauth_provider.get_access_token()
+                
+                if new_token:
+                    # Повторяем запрос
+                    response = await client.post(
+                        CONFIG["godmode_api_url"],
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {new_token}"
+                        },
+                        json={
+                            "model": CONFIG["godmode_model"],
+                            "messages": openai_messages,
+                            "max_tokens": CONFIG["godmode_max_tokens"],
+                            "temperature": 0.7,
+                        }
+                    )
+                
+                if response.status_code == 401:
+                    return {
+                        "choices": [{
+                            "message": {
+                                "content": "❌ OAuth токен недействителен. Выполни `codex login` заново."
+                            }
+                        }]
+                    }
+            
+            if response.status_code == 429:
+                return {
+                    "choices": [{
+                        "message": {
+                            "content": "❌ Превышен лимит запросов ChatGPT. Подожди немного (Plus: ~50 запросов/час)."
+                        }
+                    }]
+                }
+            
+            if response.status_code != 200:
+                error_text = response.text[:500]
+                return {
+                    "choices": [{
+                        "message": {
+                            "content": f"❌ ChatGPT ошибка {response.status_code}: {error_text}"
+                        }
+                    }]
+                }
+            
+            result = response.json()
+            
+            # Извлекаем текст из ответа
+            response_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            # Статистика токенов
+            usage = result.get("usage", {})
+            
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": f"⚡ {response_text}"  # Префикс для God Mode
+                    }
+                }],
+                "model": CONFIG["godmode_model"],
+                "godmode": True,
+                "usage": usage
+            }
+            
+    except httpx.TimeoutException:
+        return {
+            "choices": [{
+                "message": {
+                    "content": "❌ Таймаут ChatGPT. Модель долго думает — попробуй ещё раз или упрости запрос."
+                }
+            }]
+        }
+    except Exception as e:
+        return {
+            "choices": [{
+                "message": {
+                    "content": f"❌ God Mode ошибка: {str(e)}"
+                }
+            }]
+        }
 
 # ═══════════════════════════════════════════════════════════════
 # TOOLS SYSTEM
@@ -110,7 +508,7 @@ class ToolsManager:
             "execute": self._execute_yougile_find
         }
         
-        # YouGile Create - NEW!
+        # YouGile Create
         self.tools["yougile_create"] = {
             "name": "yougile_create",
             "description": "Создать новую задачу в YouGile. ОБЯЗАТЕЛЬНО используй этот инструмент когда просят добавить/создать задачу!",
@@ -138,12 +536,10 @@ class ToolsManager:
             return "❌ Пустой поисковый запрос"
         
         try:
-            # Импортируем skill
             from skills.web_search.scripts.main import search
             result = search(query, count=5)
             return result
         except ImportError:
-            # Fallback - прямой вызов API
             return await self._web_search_direct(query)
         except Exception as e:
             return f"❌ Ошибка поиска: {e}"
@@ -246,7 +642,6 @@ class ToolsManager:
         try:
             from skills.yougile.scripts.main import create_task, get_columns
             
-            # Получаем первую колонку
             columns_result = get_columns()
             if isinstance(columns_result, str):
                 import json as json_module
@@ -258,8 +653,6 @@ class ToolsManager:
                 return "❌ Не найдены колонки в YouGile"
             
             column_id = columns[0].get("id")
-            
-            # Создаём задачу
             result = create_task(title=title, column_id=column_id, description=description)
             
             if "✅" in str(result) or "Создано" in str(result):
@@ -277,7 +670,6 @@ class ToolsManager:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         
         try:
-            # Получаем колонки
             boards_resp = requests.get("https://ru.yougile.com/api-v2/boards", headers=headers, timeout=10)
             boards = boards_resp.json().get("content", [])
             if not boards:
@@ -288,7 +680,6 @@ class ToolsManager:
             if not columns:
                 return "❌ Нет колонок"
             
-            # Создаём задачу
             payload = {"title": title, "columnId": columns[0]["id"]}
             if description:
                 payload["description"] = description
@@ -304,16 +695,30 @@ class ToolsManager:
     
     async def _execute_system_check(self, params: dict) -> str:
         """Проверяет статус системы"""
+        import subprocess
+        
         try:
-            from skills.exec.scripts.main import run
-            
             # Docker
-            docker_result = run("docker ps --format '{{.Names}}: {{.Status}}'", timeout=10)
-            docker_status = docker_result.get("stdout", "").strip() if docker_result.get("success") else "❌ Не удалось проверить"
+            docker_result = subprocess.run(
+                ["docker", "ps", "--format", "{{.Names}}: {{.Status}}"],
+                capture_output=True, text=True, timeout=10
+            )
+            docker_status = docker_result.stdout.strip() if docker_result.returncode == 0 else "❌ Не удалось проверить"
             
             # Disk
-            disk_result = run("df -h / | tail -1 | awk '{print $4 \" свободно из \" $2}'", timeout=5)
-            disk_status = disk_result.get("stdout", "").strip() if disk_result.get("success") else "?"
+            disk_result = subprocess.run(
+                ["df", "-h", "/"],
+                capture_output=True, text=True, timeout=5
+            )
+            if disk_result.returncode == 0:
+                lines = disk_result.stdout.strip().split('\n')
+                if len(lines) > 1:
+                    parts = lines[1].split()
+                    disk_status = f"{parts[3]} свободно из {parts[1]}"
+                else:
+                    disk_status = "?"
+            else:
+                disk_status = "?"
             
             return f"🖥️ Статус системы:\n\n📦 Docker:\n{docker_status}\n\n💾 Диск: {disk_status}"
         except Exception as e:
@@ -370,30 +775,18 @@ def needs_thinking(text: str) -> bool:
     """Определяет нужен ли thinking mode для запроса"""
     text_lower = text.lower()
     
-    # Паттерны для thinking mode
     thinking_patterns = [
-        # Математика
-        r'\d+\s*[\+\-\*\/\%]\s*\d+',  # 5 + 3, 100 / 4
+        r'\d+\s*[\+\-\*\/\%]\s*\d+',
         r'сколько будет',
         r'посчитай', r'вычисли', r'реши',
-        
-        # Логические задачи
         r'задач[аи]', r'головоломк',
-        r'волк.*коз.*капуст',  # классическая задача
+        r'волк.*коз.*капуст',
         r'перевез', r'переправ',
-        
-        # Код и алгоритмы
         r'напиши код', r'напиши функци', r'напиши программ',
         r'алгоритм', r'оптимизир',
-        
-        # Анализ
         r'проанализируй', r'сравни', r'объясни почему',
         r'как работает', r'в чём разница',
-        
-        # Планирование
         r'составь план', r'пошагов', r'step by step',
-        
-        # Рассуждения
         r'подумай', r'рассуди', r'логически',
     ]
     
@@ -586,8 +979,8 @@ def hybrid_search(query: str, person_id: str, top_k: int = 5) -> List[str]:
     except Exception as e:
         print(f"⚠️ Vector search error: {e}")
     
-    # BM25 only for owner
-    if person_id == "owner_sergey":
+    # BM25 only for owner (security)
+    if person_id == CONFIG["owner_person_id"]:
         bm25_results = bm25_search(query, top_k * 2)
     else:
         bm25_results = []
@@ -641,6 +1034,8 @@ class Session:
         self.total_tokens = 0
         self.flush_done = False
         self.tool_calls = 0
+        # GOD MODE
+        self.god_mode = False
     
     def add_message(self, role: str, content: str, is_tool: bool = False):
         tokens = count_tokens(content)
@@ -724,7 +1119,8 @@ class Session:
             "flush_threshold": CONFIG["flush_threshold"],
             "needs_flush": self.needs_flush(),
             "flush_done": self.flush_done,
-            "tool_calls": self.tool_calls
+            "tool_calls": self.tool_calls,
+            "god_mode": self.god_mode
         }
 
 class SessionManager:
@@ -752,7 +1148,7 @@ class SessionManager:
             
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(f"{CONFIG['llm_api']}/v1/chat/completions",
-                    json={"model": "qwen3", "messages": [{"role": "user", "content": prompt}],
+                    json={"model": CONFIG["llm_model"], "messages": [{"role": "user", "content": prompt}],
                           "max_tokens": 1500, "chat_template_kwargs": {"enable_thinking": False}})
                 summary = resp.json()["choices"][0]["message"]["content"]
             
@@ -775,7 +1171,7 @@ class SessionManager:
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(f"{CONFIG['llm_api']}/v1/chat/completions",
-                    json={"model": "qwen3", "messages": [{"role": "user", "content": flush_prompt}],
+                    json={"model": CONFIG["llm_model"], "messages": [{"role": "user", "content": flush_prompt}],
                           "max_tokens": 1500, "temperature": 0.3,
                           "chat_template_kwargs": {"enable_thinking": False}})
                 result = resp.json()["choices"][0]["message"]["content"]
@@ -859,8 +1255,17 @@ def extract_and_save_facts(text: str, person_id: str, session: Session):
 # ═══════════════════════════════════════════════════════════════
 
 def init_services():
-    global embedder, milvus, workspace, tools_manager
-    print("🚀 Loading RAG v10.0 (with TOOLS)...")
+    global embedder, milvus, workspace, tools_manager, oauth_provider
+    print(f"🚀 Loading ANIMARA RAG Proxy v{CONFIG['version']}...")
+    print(f"   🧠 God Mode: ChatGPT via OAuth ({CONFIG['godmode_model']})")
+    
+    # Init OAuth Provider
+    oauth_provider = ChatGPTAuthProvider()
+    oauth_status = oauth_provider.get_status()
+    if oauth_status["configured"]:
+        print(f"   ✅ OAuth: настроен, expires in {oauth_status['expires_in_human']}")
+    else:
+        print(f"   ⚠️ OAuth: не настроен. Выполни: codex login")
     
     embedder = SentenceTransformer(CONFIG["embedding_model"], trust_remote_code=True)
     print("✅ Embedder ready")
@@ -876,7 +1281,7 @@ def init_services():
     
     build_bm25_index()
     
-    print(f"🎉 RAG Proxy v10.0 ready!")
+    print(f"🎉 RAG Proxy v{CONFIG['version']} ready!")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -885,14 +1290,28 @@ async def lifespan(app: FastAPI):
     for pid in list(session_manager.sessions.keys()):
         session_manager.end_session(pid)
 
-app = FastAPI(lifespan=lifespan, title="Animara RAG Proxy v10.1")
+app = FastAPI(lifespan=lifespan, title=f"Animara RAG Proxy v{CONFIG['version']}")
 
 @app.get("/health")
 async def health():
+    oauth_status = oauth_provider.get_status() if oauth_provider else {"configured": False}
+    
     return {
         "status": "ok",
-        "version": "10.1",
-        "features": ["workspace", "hybrid_search", "bm25", "memory_flush", "session_pruning", "TOOLS", "THINKING_MODE"],
+        "version": CONFIG["version"],
+        "features": ["workspace", "hybrid_search", "bm25", "memory_flush", "session_pruning", "TOOLS", "THINKING_MODE", "GOD_MODE_OAUTH"],
+        "godmode": {
+            "type": "OAuth (ChatGPT Plus/Pro)",
+            "configured": oauth_status.get("configured", False),
+            "model": CONFIG["godmode_model"],
+            "context_window": f"{CONFIG['godmode_context'] // 1000}K tokens",
+            "max_output": f"{CONFIG['godmode_max_tokens']} tokens",
+            "oauth_status": oauth_status
+        },
+        "local_llm": {
+            "model": CONFIG["llm_model"],
+            "context_window": f"{CONFIG['llm_context'] // 1000}K tokens",
+        },
         "tools": list(tools_manager.tools.keys()) if tools_manager else [],
         "active_sessions": len(session_manager.sessions),
         "bm25_docs": len(bm25_docs),
@@ -905,7 +1324,7 @@ async def list_models():
         return resp.json()
 
 # ═══════════════════════════════════════════════════════════════
-# MAIN ENDPOINT WITH TOOLS
+# MAIN ENDPOINT WITH TOOLS + GOD MODE (OAuth)
 # ═══════════════════════════════════════════════════════════════
 
 @app.post("/v1/chat/completions")
@@ -914,10 +1333,11 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     stream = body.get("stream", False)
     person_id = body.get("person_id", CONFIG["default_person_id"])
-    enable_tools = body.get("enable_tools", True)  # NEW
+    enable_tools = body.get("enable_tools", True)
     
     session = session_manager.get_or_create(person_id)
     
+    # Memory flush если нужно
     if session.needs_flush():
         await session_manager.memory_flush(session)
     
@@ -928,10 +1348,140 @@ async def chat_completions(request: Request):
             user_message = msg.get("content", "")
             break
     
-    print(f"\n🔍 [{session.session_id}] {session.total_tokens} tok | {user_message[:50]}...")
+    print(f"\n📝 [{session.session_id}] {session.total_tokens} tok | god={session.god_mode} | {user_message[:50]}...")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # ПРОВЕРКА КОМАНД GOD MODE
+    # ═══════════════════════════════════════════════════════════════
+    
+    godmode_cmd = check_godmode_command(user_message)
+    
+    if godmode_cmd == "activate":
+        # Только owner может включить God Mode
+        if person_id != CONFIG["owner_person_id"]:
+            return {
+                "choices": [{"message": {"content": "❌ God Mode доступен только владельцу."}}],
+                "animara_stats": {"session": session.get_stats(), "god_mode": False}
+            }
+        
+        session.god_mode = True
+        
+        # Проверяем OAuth
+        oauth_status = oauth_provider.get_status()
+        if not oauth_status["configured"]:
+            return {
+                "choices": [{
+                    "message": {
+                        "content": f"""⚡ **Режим Бога активирован!**
+
+⚠️ Но OAuth не настроен.
+
+**Как настроить (один раз):**
+1. На компьютере с браузером:
+   ```
+   npm install -g @openai/codex
+   codex login
+   ```
+2. Залогиниться в ChatGPT через браузер
+3. Скопировать на Jetson:
+   ```
+   scp ~/.codex/auth.json agx-thor@192.168.1.12:~/.codex/
+   ```
+
+**Требуется:** ChatGPT Plus ($20/мес) или Pro ($200/мес)
+
+⚡ После настройки токены автообновляются!"""
+                    }
+                }],
+                "animara_stats": {"session": session.get_stats(), "god_mode": True, "oauth_configured": False}
+            }
+        
+        return {
+            "choices": [{
+                "message": {
+                    "content": f"""⚡ **Режим Бога активирован!**
+
+🧠 Модель: **{CONFIG['godmode_model']}**
+📊 Контекст: **{CONFIG['godmode_context'] // 1000}K токенов**
+🔐 OAuth: ✅ настроен (expires in {oauth_status['expires_in_human']})
+
+Теперь ты работаешь с мощным мозгом ChatGPT.
+
+Для возврата к локальной модели: **"Отключи режим бога"** или **/local**"""
+                }
+            }],
+            "animara_stats": {"session": session.get_stats(), "god_mode": True}
+        }
+    
+    if godmode_cmd == "deactivate":
+        session.god_mode = False
+        return {
+            "choices": [{
+                "message": {
+                    "content": f"""✅ **Локальный режим активирован!**
+
+🧠 Модель: **{CONFIG['llm_model']}** (локальный)
+📊 Контекст: **{CONFIG['llm_context'] // 1000}K токенов**
+💰 Стоимость: **$0** (всё на твоём железе)
+
+Для включения God Mode: **"Активируй режим бога"** или **/god**"""
+                }
+            }],
+            "animara_stats": {"session": session.get_stats(), "god_mode": False}
+        }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # GOD MODE — ChatGPT через OAuth
+    # ═══════════════════════════════════════════════════════════════
+    
+    if session.god_mode:
+        # В God Mode используем ChatGPT
+        workspace_ctx = workspace.get_context() if person_id == CONFIG["owner_person_id"] else ""
+        
+        # Формируем system prompt для ChatGPT
+        system_prompt = f"""Ты — Animara, персональный AI-ассистент в режиме бога (God Mode).
+
+{workspace_ctx}
+
+ИНСТРУКЦИИ:
+- Отвечай на русском языке
+- У тебя огромный контекст ({CONFIG['godmode_context'] // 1000}K токенов) — используй его
+- Ты можешь решать сложные задачи, писать код, анализировать
+- Если нужно думать пошагово — думай пошагово
+- Будь полезным и дружелюбным"""
+
+        # Добавляем контекст сессии
+        session_ctx = session.get_context(10)
+        if session_ctx:
+            system_prompt += f"\n\nНЕДАВНИЙ ДИАЛОГ:\n{session_ctx}"
+        
+        # Сохраняем user message в сессию
+        if user_message:
+            session.add_message("user", user_message)
+        
+        # Вызываем ChatGPT через OAuth
+        result = await call_chatgpt_codex(messages, system_prompt)
+        
+        # Сохраняем ответ в сессию
+        response_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if response_text:
+            session.add_message("assistant", response_text)
+        
+        result["animara_stats"] = {
+            "session": session.get_stats(),
+            "god_mode": True,
+            "model": CONFIG["godmode_model"],
+            "context_window": f"{CONFIG['godmode_context'] // 1000}K"
+        }
+        
+        return result
+    
+    # ═══════════════════════════════════════════════════════════════
+    # ОБЫЧНЫЙ РЕЖИМ (Локальный Qwen3)
+    # ═══════════════════════════════════════════════════════════════
     
     # === WORKSPACE ===
-    if person_id != "owner_sergey":
+    if person_id != CONFIG["owner_person_id"]:
         workspace_ctx = "Ты — Animara, AI-ассистент. Представься и спроси чем помочь."
     else:
         workspace_ctx = workspace.get_context()
@@ -949,7 +1499,7 @@ async def chat_completions(request: Request):
     
     # === TOOLS PROMPT ===
     tools_prompt = ""
-    if enable_tools and tools_manager and person_id == "owner_sergey":
+    if enable_tools and tools_manager and person_id == CONFIG["owner_person_id"]:
         tools_prompt = "\n\n" + tools_manager.get_tools_prompt()
     
     # === THINKING MODE ===
@@ -976,7 +1526,9 @@ async def chat_completions(request: Request):
 - Актуальная информация (погода, новости, цены) → web_search
 - Создать/добавить задачу → yougile_create
 - Список задач → yougile_tasks
-- Логика, математика, код → думай пошагово"""
+- Логика, математика, код → думай пошагово
+
+💡 Для сложных задач скажи "Активируй режим бога" — получишь 128K контекст!"""
 
     # Сохраняем в сессию
     if user_message:
@@ -988,11 +1540,11 @@ async def chat_completions(request: Request):
     
     for iteration in range(CONFIG["max_tool_iterations"]):
         llm_body = {
-            "model": body.get("model", "qwen3"),
+            "model": body.get("model", CONFIG["llm_model"]),
             "messages": llm_messages,
-            "max_tokens": body.get("max_tokens", 2000),
+            "max_tokens": body.get("max_tokens", CONFIG["llm_max_tokens"]),
             "temperature": body.get("temperature", 0.7),
-            "chat_template_kwargs": {"enable_thinking": use_thinking}  # Динамический thinking!
+            "chat_template_kwargs": {"enable_thinking": use_thinking}
         }
         
         async with httpx.AsyncClient(timeout=120) as client:
@@ -1021,10 +1573,9 @@ async def chat_completions(request: Request):
             
             session.add_message("tool", tool_result, is_tool=True)
             
-            continue  # Следующая итерация
+            continue
         else:
             # Нет вызова инструмента — финальный ответ
-            # Убираем теги tool если они остались
             content = re.sub(r'<tool>.*?</tool>', '', content, flags=re.DOTALL).strip()
             
             if content:
@@ -1033,7 +1584,8 @@ async def chat_completions(request: Request):
             result["choices"][0]["message"]["content"] = content
             result["animara_stats"] = {
                 "session": session.get_stats(),
-                "tools_used": session.tool_calls
+                "tools_used": session.tool_calls,
+                "god_mode": False
             }
             
             return result
@@ -1043,6 +1595,63 @@ async def chat_completions(request: Request):
         "choices": [{"message": {"content": "⚠️ Превышен лимит итераций инструментов"}}],
         "animara_stats": {"session": session.get_stats(), "error": "max_iterations"}
     }
+
+# ═══════════════════════════════════════════════════════════════
+# GOD MODE ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/godmode")
+async def godmode_status():
+    """Статус God Mode"""
+    oauth_status = oauth_provider.get_status() if oauth_provider else {"configured": False}
+    
+    active_sessions = []
+    for pid, session in session_manager.sessions.items():
+        if session.god_mode:
+            active_sessions.append(pid)
+    
+    return {
+        "type": "OAuth (ChatGPT Plus/Pro subscription)",
+        "oauth_status": oauth_status,
+        "model": CONFIG["godmode_model"],
+        "context_window": f"{CONFIG['godmode_context'] // 1000}K tokens",
+        "max_output_tokens": CONFIG["godmode_max_tokens"],
+        "active_sessions": active_sessions,
+        "setup_instructions": """
+1. На компьютере с браузером:
+   npm install -g @openai/codex
+   codex login
+
+2. Скопировать на Jetson Thor:
+   scp ~/.codex/auth.json agx-thor@192.168.1.12:~/.codex/
+
+3. Токены автообновляются!
+"""
+    }
+
+@app.post("/godmode/model")
+async def set_godmode_model(request: Request):
+    """Сменить модель God Mode"""
+    body = await request.json()
+    model = body.get("model", "")
+    
+    valid_models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o4-mini", "gpt-5.2-codex"]
+    
+    if model not in valid_models:
+        return {"error": f"Invalid model. Choose from: {valid_models}"}
+    
+    CONFIG["godmode_model"] = model
+    print(f"⚡ God Mode model changed to: {model}")
+    
+    return {"status": "ok", "model": model}
+
+@app.post("/godmode/refresh")
+async def refresh_oauth():
+    """Принудительно обновить OAuth токен"""
+    if oauth_provider:
+        success = await oauth_provider._refresh_token()
+        return {"status": "ok" if success else "error", "refreshed": success}
+    return {"error": "OAuth not initialized"}
 
 # ═══════════════════════════════════════════════════════════════
 # ADDITIONAL ENDPOINTS
