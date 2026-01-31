@@ -74,7 +74,7 @@ sys.path.insert(0, os.path.expanduser("~/animara"))
 # ═══════════════════════════════════════════════════════════════
 
 CONFIG = {
-    "version": "10.6",
+    "version": "10.6.1",  # Fixed: God Mode now uses session history
     
     # Local LLM (Qwen3)
     "llm_api": "http://127.0.0.1:8010",
@@ -1439,7 +1439,16 @@ async def chat_completions(request: Request):
         # ═══════════════════════════════════════════════════════════
         print(f"⚡ God Mode request from {person_id}")
         
-        result = await call_godmode_llm(messages, system_content, tools_manager)
+        # Формируем историю из СЕССИИ (не из текущего запроса!)
+        # Берём последние N сообщений для контекста
+        session_messages = []
+        for msg in session.messages[-10:]:  # Последние 10 сообщений
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role in ["user", "assistant"] and content and not msg.get("is_tool"):
+                session_messages.append({"role": role, "content": content[:1000]})  # Обрезаем длинные
+        
+        result = await call_godmode_llm(session_messages, system_content, tools_manager)
         
         content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
         
