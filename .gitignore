@@ -19,3 +19,23 @@ backups/
 
 # Temp
 *.tmp
+
+# Backups
+*.bak*
+*.backup*
+*_backup_*/
+workspace_backup_*/
+
+# Archives
+*.tar.gz
+
+# MCP submodules (npm installed)
+mcp_servers/google-calendar-mcp/
+mcp_servers/yougile-mcp-new/
+
+# Docker hub (not used)
+mcp-hub/
+mcp-hub.tar.gz
+
+# Old configs
+mcp_config_new.json
