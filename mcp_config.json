@@ -1,88 +1,11 @@
 {
   "mcpServers": {
-    "yougile": {
-      "command": "node",
-      "args": [
-        "/home/agx-thor/animara/mcp_servers/yougile-mcp-new/build/index.js"
-      ],
-      "env": {
-        "YOUGILE_API_KEY": "eAbKs-KzViRbIzz+k0dscDYbfrUxJdlvC9OmeUN4YKZIxEt0gax9WUQpjbCB3wJg"
-      }
-    },
-    "time": {
-      "command": "uvx",
-      "args": [
-        "mcp-server-time",
-        "--local-timezone",
-        "Asia/Makassar"
-      ],
-      "env": {}
-    },
-    "exec": {
-      "command": "python3",
-      "args": [
-        "/home/agx-thor/animara/mcp_servers/exec_mcp.py"
-      ],
-      "env": {}
-    },
-    "filesystem": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/home/agx-thor/animara"
-      ],
-      "env": {}
-    },
-    "memory": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-memory"
-      ],
-      "env": {
-        "MEMORY_FILE": "/home/agx-thor/animara/data/memory_kg.json"
-      }
-    },
-    "milvus": {
-      "command": "uvx",
-      "args": [
-        "mcp-server-milvus",
-        "--uri",
-        "http://localhost:19530"
-      ],
-      "env": {
-        "MILVUS_URI": "http://localhost:19530"
-      }
-    },
-    "brightdata": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@brightdata/mcp"
-      ],
-      "env": {
-        "API_TOKEN": "59562d71-3910-4f98-aae3-985429dbf71b"
-      }
-    },
-    "google_calendar": {
-      "command": "node",
-      "args": [
-        "/home/agx-thor/animara/mcp_servers/google-calendar-mcp/build/index.js"
-      ],
-      "env": {
-        "GOOGLE_OAUTH_CREDENTIALS": "/home/agx-thor/.gmail-mcp/gcp-oauth.keys.json"
-      }
-    },
-    "gmail": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@gongrzhe/server-gmail-autoauth-mcp"
-      ],
-      "env": {
-        "GMAIL_MCP_OAUTH_KEYS_FILE": "/home/agx-thor/.gmail-mcp/gcp-oauth.keys.json"
-      }
-    }
+    "yougile": {"url": "http://localhost:8020/servers/yougile/sse"},
+    "time": {"url": "http://localhost:8020/servers/time/sse"},
+    "exec": {"url": "http://localhost:8020/servers/exec/sse"},
+    "brightdata": {"url": "http://localhost:8020/servers/brightdata/sse"},
+    "filesystem": {"url": "http://localhost:8020/servers/filesystem/sse"},
+    "memory": {"url": "http://localhost:8020/servers/memory/sse"},
+    "milvus": {"url": "http://localhost:8020/servers/milvus/sse"}
   }
 }
